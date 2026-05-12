@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <title>3D Web FPS - Weapon System</title>
+    <title>3D Web FPS - Advanced Combat</title>
     <style>
         body { margin: 0; overflow: hidden; background: #000; }
         #crosshair {
@@ -13,20 +13,22 @@
         }
         #ui {
             position: absolute; bottom: 30px; right: 50px;
-            color: white; font-family: 'Courier New', Courier, monospace;
+            color: white; font-family: 'Courier New', monospace;
             text-align: right; text-shadow: 2px 2px 2px black;
         }
-        .ammo { font-size: 40px; font-weight: bold; }
-        .total-ammo { font-size: 20px; color: #aaa; }
-        #weapon-name { font-size: 24px; margin-bottom: 5px; color: #ffcc00; }
+        #enemy-ui {
+            position: absolute; top: 20px; left: 50%;
+            transform: translateX(-50%);
+            color: red; font-size: 20px; font-weight: bold;
+        }
     </style>
 </head>
 <body>
     <div id="crosshair"></div>
+    <div id="enemy-ui">로봇 체력: 150 / 150</div>
     <div id="ui">
         <div id="weapon-name">돌격소총</div>
-        <span class="ammo" id="current-ammo">30</span>
-        <span class="total-ammo" id="max-ammo"> / 90</span>
+        <div id="ammo-display"><span style="font-size:40px;" id="current-ammo">30</span> / 90</div>
     </div>
 
     <script type="importmap">
@@ -42,9 +44,9 @@
         import * as THREE from 'three';
         import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 
-        // --- 초기 세팅 ---
+        // --- 초기화 ---
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x111111);
+        scene.background = new THREE.Color(0x222222);
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
@@ -54,128 +56,120 @@
         document.addEventListener('click', () => controls.lock());
 
         // --- 조명 ---
-        const light = new THREE.PointLight(0xffffff, 100);
-        camera.add(light); // 카메라에 조명을 달아 무기가 잘 보이게 함
+        const light = new THREE.PointLight(0xffffff, 50);
+        camera.add(light);
         scene.add(camera);
+        scene.add(new THREE.AmbientLight(0x404040));
 
-        // --- 무기 데이터 설정 ---
+        // --- 바닥 ---
+        scene.add(new THREE.Mesh(new THREE.GridHelper(100, 100), new THREE.MeshBasicMaterial({color: 0x444444})));
+
+        // --- 로봇 그룹 생성 (부위별 분리) ---
+        const robot = new THREE.Group();
+        robot.hp = 150;
+
+        function createPart(w, h, d, y, color, name) {
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({color}));
+            mesh.position.y = y;
+            mesh.name = name; // 피격 판정용 이름
+            return mesh;
+        }
+
+        const head = createPart(0.4, 0.4, 0.4, 2.0, 0xff0000, "HEAD");
+        const body = createPart(0.7, 0.8, 0.4, 1.4, 0xaaaaaa, "BODY");
+        const legL = createPart(0.25, 0.9, 0.25, 0.5, 0x555555, "LEG");
+        legL.position.x = -0.2;
+        const legR = createPart(0.25, 0.9, 0.25, 0.5, 0x555555, "LEG");
+        legR.position.x = 0.2;
+
+        robot.add(head, body, legL, legR);
+        robot.position.set(0, 0, -10);
+        scene.add(robot);
+
+        // --- 무기 데이터 ---
         const weapons = {
-            "돌격소총": { ammo: 30, max: 30, total: 90, color: 0x444444, size: [0.2, 0.2, 0.8] },
-            "쇼티": { ammo: 2, max: 2, total: 12, color: 0x222222, size: [0.15, 0.25, 0.5] },
-            "단검": { ammo: 0, max: 0, total: 0, color: 0xcccccc, size: [0.05, 0.1, 0.4] }
+            "돌격소총": { ammo: 30, max: 30, total: 90, type: 'gun' },
+            "쇼티": { ammo: 2, max: 2, total: 12, type: 'shotgun' },
+            "단검": { type: 'melee' }
         };
-        let currentWpName = "돌격소총";
-        let isReloading = false;
+        let currentWp = "돌격소총";
+        const raycaster = new THREE.Raycaster();
 
-        // --- 무기 모델(Viewmodel) 생성 ---
-        const weaponGroup = new THREE.Group();
-        const weaponMesh = new THREE.Mesh(
-            new THREE.BoxGeometry(0.2, 0.2, 0.8),
-            new THREE.MeshStandardMaterial({ color: 0x444444 })
-        );
-        // 왼쪽 아래 배치
-        weaponMesh.position.set(0.5, -0.4, -0.8); 
-        weaponGroup.add(weaponMesh);
-        camera.add(weaponGroup); // 카메라의 자식으로 설정하여 시선 이동을 따름
-
-        // --- 재장전 로직 (수학적 계산) ---
-        function reload() {
-            const wp = weapons[currentWpName];
-            if (isReloading || wp.ammo === wp.max || wp.total <= 0 || currentWpName === "단검") return;
-
-            isReloading = true;
-            console.log("재장전 중...");
-
-            setTimeout(() => {
-                const needed = wp.max - wp.ammo; // 탄창에 채울 양
-                const transfer = Math.min(needed, wp.total); // 남은 총알과 필요한 양 중 작은 값
+        // --- 데미지 계산 함수 ---
+        function calculateDamage(partName, distance, isRightClick) {
+            if (currentWp === "돌격소총") {
+                if (partName === "HEAD") return 150;
+                if (partName === "BODY") return 60;
+                return 30; // LEG
+            } 
+            if (currentWp === "쇼티") {
+                if (distance < 3) return 150;
+                if (distance < 8) return 30;
+                return 10;
+            }
+            if (currentWp === "단검") {
+                // 백스탭 판정: 내 시선 방향과 로봇의 시선 방향이 비슷하면 뒤에서 찌른 것
+                const playerDir = new THREE.Vector3();
+                camera.getWorldDirection(playerDir);
+                const robotDir = new THREE.Vector3(0, 0, -1); // 로봇은 기본적으로 앞(-z)을 봄
                 
-                wp.ammo += transfer;
-                wp.total -= transfer;
-                
-                isReloading = false;
-                updateUI();
-            }, 1000); // 1초 뒤 장전 완료
+                const dot = playerDir.dot(robotDir);
+                if (isRightClick && dot > 0.5) return 150; // 뒤에서 우클릭
+                return 75;
+            }
+            return 0;
         }
 
         // --- 발사 로직 ---
-        function shoot() {
-            const wp = weapons[currentWpName];
-            if (isReloading) return;
+        function attack(isRightClick = false) {
+            const wp = weapons[currentWp];
+            if (wp.type !== 'melee' && wp.ammo <= 0) return;
+            if (wp.type !== 'melee') wp.ammo--;
 
-            if (currentWpName !== "단검") {
-                if (wp.ammo > 0) {
-                    wp.ammo--;
-                    recoilAnimation();
-                } else {
-                    reload();
-                    return;
+            // 레이캐스팅 (정중앙 발사)
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            const intersects = raycaster.intersectObjects(robot.children);
+
+            if (intersects.length > 0) {
+                const hit = intersects[0];
+                const damage = calculateDamage(hit.object.name, hit.distance, isRightClick);
+                robot.hp -= damage;
+                console.log(`${hit.object.name} 피격! 데미지: ${damage}`);
+                
+                if (robot.hp <= 0) {
+                    robot.hp = 0;
+                    hit.object.material.color.set(0x000000); // 파괴 효과
                 }
-            } else {
-                recoilAnimation(); // 단검은 탄약 무관 휘두르기
             }
             updateUI();
         }
 
-        // --- 반동/휘두르기 애니메이션 ---
-        function recoilAnimation() {
-            weaponMesh.position.z += 0.2; // 뒤로 밀림
-            weaponMesh.rotation.y += 0.2; // 좌우 흔들림
-            setTimeout(() => {
-                weaponMesh.position.z = -0.8;
-                weaponMesh.rotation.y = 0;
-            }, 50);
-        }
-
-        // --- 무기 교체 ---
-        function switchWeapon(id) {
-            const names = ["돌격소총", "쇼티", "단검"];
-            currentWpName = names[id - 1];
-            const wp = weapons[currentWpName];
-            
-            // 모델 외형 변경
-            weaponMesh.geometry = new THREE.BoxGeometry(...wp.size);
-            weaponMesh.material.color.setHex(wp.color);
-            
-            updateUI();
-        }
-
-        function updateUI() {
-            const wp = weapons[currentWpName];
-            document.getElementById('weapon-name').innerText = currentWpName;
-            document.getElementById('current-ammo').innerText = currentWpName === "단검" ? "-" : wp.ammo;
-            document.getElementById('max-ammo').innerText = currentWpName === "단검" ? "" : ` / ${wp.total}`;
-        }
-
-        // --- 이벤트 리스너 ---
+        // --- 이벤트 ---
         window.addEventListener('mousedown', (e) => {
-            if (e.button === 0) shoot();
+            if (e.button === 0) attack(false); // 좌클릭
+            if (e.button === 2 && currentWp === "단검") attack(true); // 단검 우클릭
         });
 
         window.addEventListener('keydown', (e) => {
-            if (e.code === 'KeyR') reload();
-            if (e.code === 'Digit1') switchWeapon(1);
-            if (e.code === 'Digit2') switchWeapon(2);
-            if (e.code === 'Digit3') switchWeapon(3);
+            if (e.code === 'Digit1') currentWp = "돌격소총";
+            if (e.code === 'Digit2') currentWp = "쇼티";
+            if (e.code === 'Digit3') currentWp = "단검";
+            updateUI();
         });
 
-        // --- 애니메이션 루프 (흔들림 효과 추가) ---
-        let walkCycle = 0;
-        function animate() {
-            requestAnimationFrame(animate);
-
-            // 이동 중일 때 무기 좌우 흔들림 (Sway)
-            if (controls.isLocked) {
-                // 이 예제에서는 단순화를 위해 항상 약간 흔들리게 설정
-                walkCycle += 0.05;
-                weaponMesh.position.x = 0.5 + Math.sin(walkCycle) * 0.02;
-                weaponMesh.position.y = -0.4 + Math.cos(walkCycle * 2) * 0.01;
-            }
-
-            renderer.render(scene, camera);
+        function updateUI() {
+            const wp = weapons[currentWp];
+            document.getElementById('weapon-name').innerText = currentWp;
+            document.getElementById('current-ammo').innerText = wp.type === 'melee' ? "-" : wp.ammo;
+            document.getElementById('enemy-ui').innerText = `로봇 체력: ${robot.hp} / 150`;
         }
 
-        updateUI();
+        window.addEventListener('contextmenu', e => e.preventDefault());
+
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
         animate();
     </script>
 </body>
